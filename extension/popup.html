@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>FB Lead Router</title>
+  </head>
+  <body>
+    <header>
+      <h1>Lead Router</h1>
+      <label class="switch" title="Encender o apagar las respuestas automáticas">
+        <input type="checkbox" id="enabled" />
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <p id="status" class="status status--off">Apagado</p>
+
+    <section class="stats">
+      <div><strong id="statToday">0</strong><span>respondidos hoy</span></div>
+      <div><strong id="statHour">0</strong><span>en la última hora</span></div>
+    </section>
+
+    <section>
+      <h2>Respuesta automática</h2>
+      <p class="hint">
+        Se envía tal cual, sólo a quien pregunta si el inmueble sigue disponible
+        y nada más. Cualquier otra pregunta se queda sin leer en tu bandeja.
+      </p>
+      <textarea id="replyCopy" rows="9" spellcheck="false" placeholder="Hola! Sí, el inmueble se encuentra disponible.&#10;Para darte toda la información te atendemos por WhatsApp. Escríbenos por este enlace y envíanos el código del inmueble: https://wa.me/message/TU_CODIGO&#10;&#10;También puedes escribirnos al WhatsApp: 300 000 0000"></textarea>
+      <p class="hint" id="copyMeta">—</p>
+    </section>
+
+    <section>
+      <h2>Diagnóstico</h2>
+      <p class="hint">
+        Abre la bandeja de Marketplace y pulsa el botón: te dice qué hilos ve,
+        cuáles están sin leer y a cuáles respondería ahora mismo.
+      </p>
+      <button id="diagnoseBtn" class="secondary">Ver qué detecta</button>
+      <p id="diagnoseResult" class="result" hidden></p>
+    </section>
+
+    <details>
+      <summary>Horario y límites</summary>
+
+      <div class="row">
+        <div>
+          <label for="activeHoursStart">Desde (hora)</label>
+          <input type="number" id="activeHoursStart" min="0" max="23" step="1" />
+        </div>
+        <div>
+          <label for="activeHoursEnd">Hasta (hora)</label>
+          <input type="number" id="activeHoursEnd" min="1" max="24" step="1" />
+        </div>
+      </div>
+      <p class="hint">18 a 24 = de 6 PM a medianoche. Para siempre activo, pon 0 y 24.</p>
+
+      <div class="row">
+        <div>
+          <label for="maxRepliesPerHour">Máx. por hora</label>
+          <input type="number" id="maxRepliesPerHour" min="1" step="1" />
+        </div>
+        <div>
+          <label for="minSecondsBetweenReplies">Espaciado (s)</label>
+          <input type="number" id="minSecondsBetweenReplies" min="0" step="10" />
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="minPreReplyDelayMs">Espera mín. (s)</label>
+          <input type="number" id="minPreReplyDelayMs" min="0" step="1" />
+        </div>
+        <div>
+          <label for="maxPreReplyDelayMs">Espera máx. (s)</label>
+          <input type="number" id="maxPreReplyDelayMs" min="0" step="1" />
+        </div>
+      </div>
+
+      <label class="checkbox">
+        <input type="checkbox" id="verboseLogs" />
+        Registro detallado en la consola de la pestaña
+      </label>
+
+      <button id="forgetBtn" class="link">Olvidar hilos ya respondidos</button>
+    </details>
+
+    <section>
+      <h2>Actividad reciente</h2>
+      <ul id="log" class="log">
+        <li class="log__empty">Todavía no hay eventos.</li>
+      </ul>
+      <button id="clearLogBtn" class="link">Limpiar registro</button>
+    </section>
+
+    <footer>
+      <p id="saveState" class="saved">Los cambios se guardan solos.</p>
+    </footer>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

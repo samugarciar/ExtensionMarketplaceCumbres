@@ -1,0 +1,8 @@
+# Sistema
+.DS_Store
+
+# Estado local del script de arranque
+.run/
+
+# Logs sueltos
+*.log
