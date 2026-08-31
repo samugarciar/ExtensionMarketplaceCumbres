@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "FB Marketplace Lead Router",
   "version": "1.0.0",
-  "description": "Responde automáticamente sólo las preguntas genéricas de disponibilidad en Marketplace; el resto se queda sin leer para que lo atiendas tú.",
+  "description": "Responde en Messenger sólo las preguntas genéricas de disponibilidad de Marketplace; el resto lo devuelve a no leído para que lo atiendas tú.",
   "permissions": [
     "storage",
     "activeTab"
@@ -13,9 +13,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.facebook.com/marketplace/inbox*",
         "https://www.facebook.com/messages/*",
-        "https://web.facebook.com/marketplace/inbox*",
+        "https://web.facebook.com/messages/*",
         "https://www.messenger.com/*"
       ],
       "js": [

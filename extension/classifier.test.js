@@ -164,6 +164,22 @@ test("nuestra propia respuesta nunca se confunde con una pregunta", () => {
   }
 });
 
+test("casos reales observados en la bandeja de producción", () => {
+  // Reacción con emoji: no es un mensaje, no se responde.
+  assert.strictEqual(auto("Paola reaccionó 👍 a tu mensaje"), false);
+
+  // Respuesta manual del vendedor, redactada distinta al copy configurado:
+  // la comparación con el copy no la atrapa, pero la apertura afirmativa sí.
+  assert.strictEqual(auto("Buenas tardes, si, sigue disponible"), false);
+
+  // Vista previa de notificación: no contiene el texto del comprador, así que
+  // no se puede clasificar. El content script la salta antes de llegar aquí.
+  assert.strictEqual(
+    auto("Diego Navarro te envió un mensaje sobre tu publicación: 2 habitaciones 1 baño"),
+    false
+  );
+});
+
 test("un saludo suelto no es una pregunta", () => {
   for (const caso of ["Hola", "Buenas tardes", "Hola!", "Buenas 😊"]) {
     assert.strictEqual(auto(caso), false, `NO debería auto-responder: ${caso}`);

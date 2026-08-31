@@ -16,6 +16,10 @@
 
     <p id="status" class="status status--off">Apagado</p>
 
+    <p class="hint hint--box">Funciona en <strong>Messenger</strong>. Abre
+      <code>facebook.com/messages</code> y haz clic en la carpeta
+      <strong>«Marketplace»</strong>: sin ella no se ven los hilos.</p>
+
     <section class="stats">
       <div><strong id="statToday">0</strong><span>respondidos hoy</span></div>
       <div><strong id="statHour">0</strong><span>en la última hora</span></div>
@@ -34,7 +38,7 @@
     <section>
       <h2>Diagnóstico</h2>
       <p class="hint">
-        Abre la bandeja de Marketplace y pulsa el botón: te dice qué hilos ve,
+        Con la carpeta Marketplace abierta, pulsa el botón: te dice qué hilos ve,
         cuáles están sin leer y a cuáles respondería ahora mismo.
       </p>
       <button id="diagnoseBtn" class="secondary">Ver qué detecta</button>
@@ -88,6 +92,8 @@
 
     <section>
       <h2>Actividad reciente</h2>
+      <p class="hint">En azul, conversaciones que se abrieron, resultaron no ser
+        genéricas y se <strong>devolvieron a no leído</strong> para que las atiendas tú.</p>
       <ul id="log" class="log">
         <li class="log__empty">Todavía no hay eventos.</li>
       </ul>

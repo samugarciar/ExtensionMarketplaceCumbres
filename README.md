@@ -1,10 +1,10 @@
 # FB Marketplace Lead Router
 
-Extensión de Chrome que atiende la bandeja de Facebook Marketplace con una sola
-regla:
+Extensión de Chrome que atiende la carpeta **Marketplace de Messenger** con una
+sola regla:
 
 > Si el mensaje es **sólo** una pregunta de disponibilidad, responde con tu copy.
-> Cualquier otra cosa se queda **sin leer**, esperándote en la bandeja.
+> Cualquier otra cosa se **devuelve a "no leído"** y te espera en la bandeja.
 
 No hay servidor, ni base de datos, ni API key. Todo vive en la extensión.
 
@@ -17,20 +17,20 @@ automatización a nivel de sesión y de cuenta, no por la velocidad del tecleo, 
 que **nada de aquí garantiza que la cuenta no sea restringida**. Usa una cuenta
 de negocio cuya pérdida no te bloquee la operación.
 
-La extensión llega apagada de fábrica y con límites conservadores (15/hora,
-2 minutos entre mensajes, 18:00–00:00).
+Llega apagada de fábrica, con límites conservadores (15/hora, 2 minutos entre
+mensajes, 18:00–00:00) y sin copy configurado.
 
 ---
 
 ## Instalación
 
-1. `chrome://extensions/` → activa **Modo de desarrollador**.
-2. **Cargar descomprimida** → selecciona la carpeta `extension/`.
-3. Abre el popup y **pega tu copy** en el recuadro. El campo trae un ejemplo
-   de estructura como texto de fondo. Mientras esté vacío no se responde nada.
-4. Abre <https://www.facebook.com/marketplace/inbox> con tu sesión iniciada.
-5. Pulsa **Ver qué detecta** y comprueba que reconoce tus hilos *antes* de
-   encender el interruptor.
+1. `chrome://extensions/` → **Modo de desarrollador**.
+2. **Cargar descomprimida** → carpeta `extension/`.
+3. Abre el popup y **pega tu copy**. Mientras esté vacío no responde nada.
+4. Abre <https://www.facebook.com/messages> y **haz clic en la carpeta
+   «Marketplace»** de la lista de chats.
+5. Pulsa **Ver qué detecta** con el interruptor apagado, y comprueba que
+   reconoce tus hilos.
 6. Enciende.
 
 Para que funcione desatendida:
@@ -39,74 +39,81 @@ Para que funcione desatendida:
 ./ops/start-24-7.sh start
 ```
 
-Desactiva la suspensión del Mac y abre la bandeja en Chrome. Es lo único que
-hace falta: **si Chrome se cierra o el equipo se duerme, no se responde nada.**
+Desactiva la suspensión del Mac y abre Chrome. **Si Chrome se cierra, el equipo
+se duerme o recargas la pestaña sin volver a entrar en la carpeta, deja de
+responder.**
+
+### Por qué hay que abrir la carpeta a mano
+
+Messenger carga los hilos de Marketplace sólo al abrir esa carpeta, y no
+responde a clics sintéticos ni a teclado — lo probé con ambos. Es una condición
+de operación, del mismo tipo que mantener la sesión iniciada. Si se te olvida,
+el registro del popup te lo recuerda.
 
 ---
 
 ## Cómo decide
 
-La decisión completa está en [`extension/classifier.js`](extension/classifier.js),
-aislada del DOM y con pruebas propias. El sesgo es deliberado: **ante la duda, a
-tu bandeja.** Un genérico que no se auto-responde te cuesta un minuto; un copy
-enlatado a quien preguntaba el canon te cuesta el cliente.
+La decisión está en [`extension/classifier.js`](extension/classifier.js), aislada
+del DOM y con 20 grupos de pruebas propias. El sesgo es deliberado: **ante la
+duda, a tu bandeja.** Un genérico sin auto-responder cuesta un minuto; un copy
+enlatado a quien preguntaba el canon cuesta el cliente.
 
-Se auto-responde sólo si el mensaje cumple **todo**:
+Se responde sólo si el mensaje cumple **todo**:
 
 | Condición | Por qué |
 |---|---|
-| Coincide con un patrón de disponibilidad | `sigue disponible`, `aún lo tienen`, `¿está libre?`, el mensaje predefinido de Marketplace, y sus equivalentes en inglés |
-| No menciona nada concreto | Precio, canon, administración, ubicación, metros, habitaciones, estrato, parqueadero, visitas, requisitos, fiador, mascotas… cualquiera de estos lo manda a tu bandeja |
+| Coincide con un patrón de disponibilidad | `sigue disponible`, `¿sigue estando disponible este artículo?` (el predefinido de Facebook), `aún lo tienen`, y sus equivalentes en inglés |
+| No menciona nada concreto | Canon, administración, ubicación, metros, habitaciones, estrato, parqueadero, visitas, requisitos, fiador, mascotas… cualquiera lo manda a tu bandeja |
 | No lleva interrogativo específico | `cuánto`, `dónde`, `cuándo`, `cuál`, `cuántos` piden un dato, no un sí/no |
-| Tiene menos de 90 caracteres | Por encima de eso hay más contenido del que el copy responde |
-| La vista previa no está cortada | Si termina en `…`, el mensaje es más largo de lo que se ve: no se abre |
+| No abre afirmando | `Sí…`, `Claro…` son respuestas, no preguntas: evita confundir tu propio mensaje con uno entrante |
+| Menos de 90 caracteres | Por encima hay más contenido del que el copy responde |
 
-Ejemplos reales:
+Ejemplos reales de la bandeja de producción:
 
 | Mensaje | Qué pasa |
 |---|---|
-| «¿Sigue disponible?» | ✅ Se responde |
-| «Hola, buenas tardes, ¿aún está disponible?» | ✅ Se responde |
-| «¿Sigue disponible? ¿Cuánto es el canon?» | ❌ Para ti |
-| «¿Disponible? ¿Cuántas habitaciones tiene?» | ❌ Para ti |
-| «¿Sigue disponible? ¿Cuándo lo puedo ver?» | ❌ Para ti |
-| «Hola» | ❌ Para ti |
+| «¿Sigue estando disponible este artículo?» | ✅ Se responde |
+| «Hola. ¿Sigue disponible?» | ✅ Se responde |
+| «¿Sigue disponible? ¿Cuánto es el canon?» | ❌ Sigue sin leer |
+| «Hola que requisitos se necesitan» | ❌ Sigue sin leer |
+| «¿Sigue estando disponible? Y tiene parqueadero?» | ❌ Se abre, se lee y **se devuelve a no leído** |
+| «Paola reaccionó 👍 a tu mensaje» | ❌ Sigue sin leer |
 
-### Nunca abre un hilo que no va a responder
+### Sólo abre lo que va a responder
 
-Clasifica leyendo la vista previa de la lista, sin entrar. Sólo abre los hilos
-que ya sabe que va a contestar. Por eso el resto se queda sin leer de forma
-natural — no hace falta "marcar como no leído" ni queda rastro de apertura.
+Clasifica leyendo la vista previa de la lista, que en Messenger trae el mensaje
+completo. Los que no son genéricos **no se abren**: conservan su punto azul.
 
-El único caso en que abre un hilo y no responde: si al ver el mensaje completo
-resulta que la vista previa se quedaba corta. Entonces no escribe nada y te lo
-avisa en el registro del popup, porque ese hilo sí quedó marcado como leído.
+Si al abrir uno el texto completo resulta no ser genérico (raro, pero es la
+última red), no escribe nada y usa **«Marcar como no leído»** para devolverlo a
+tu bandeja.
 
-### Ajustar el criterio
+---
 
-Las listas de patrones y descalificadores están al principio de
-`classifier.js`, en castellano y comentadas. Si añades o quitas términos:
+## Ajustar el criterio
+
+Los patrones y descalificadores están al principio de `classifier.js`, en
+castellano y comentados. Tras tocarlos:
 
 ```bash
 node --test extension/
 ```
 
-17 grupos de pruebas, la mayoría dedicados a los mensajes que **no** deben
-auto-responderse.
+Las pruebas incluyen los casos reales que fallaron en producción, para que no
+vuelvan a colarse.
 
 ---
 
 ## Diagnóstico
 
-El botón **Ver qué detecta** del popup recorre la bandeja abierta y te dice
-cuántos hilos ve, cuántos están sin leer y a cuántos respondería ahora mismo.
-El detalle por hilo — las líneas que leyó, cuál tomó como vista previa y por
-qué decidió lo que decidió — va a la consola de la pestaña (F12 → Console).
+**Ver qué detecta** recorre la lista y te dice cuántos hilos ve, cuántos sin
+leer, a cuántos respondería y si la carpeta está abierta. El detalle por hilo va
+a la consola de la pestaña (F12 → Console), y `report()` vuelca cada decisión
+de envío ahí también.
 
-Es la herramienta a usar cuando Facebook cambie el DOM. Todos los selectores
-frágiles están en un único bloque `SELECTORS` al principio de
-[`extension/content.js`](extension/content.js); se parchea ahí y en ningún otro
-sitio.
+Todos los selectores frágiles están en un único bloque `SELECTORS` al principio
+de [`extension/content.js`](extension/content.js).
 
 ---
 
@@ -114,13 +121,13 @@ sitio.
 
 | Síntoma | Causa habitual |
 |---|---|
-| No responde nada | Interruptor apagado, fuera de horario, o el copy está vacío. El popup lo dice arriba. |
-| «Ver qué detecta» falla | La pestaña activa no es la bandeja de Marketplace. Ábrela y recárgala. |
-| Ve 0 hilos sin leer | Facebook cambió cómo marca lo no leído. Mira `UNREAD_HINTS` en `content.js`. |
-| Ve los hilos pero no responde ninguno | La vista previa se está extrayendo mal. El diagnóstico muestra qué línea toma. |
-| Escribe pero no envía | Cambió el botón de envío. Revisa `SEND_LABELS` en `content.js`. |
+| «Abre la carpeta Marketplace» en el registro | Recargaste la pestaña y la carpeta volvió a colapsarse. |
+| Ve 0 conversaciones | Estás en la lista general, no dentro de la carpeta. |
+| No responde nada | Interruptor apagado, fuera de horario, o falta el copy. El popup lo dice arriba. |
+| «Descartado sin enviar» | El editor quedó con un texto distinto al copy. La red de seguridad hizo su trabajo; se reintenta. |
+| «No se pudo devolver a no leído» | Cambió el menú de fila. Revisa `MARK_UNREAD` en `content.js`. |
 | Respondió algo que no debía | Añade el término a `DISQUALIFIERS` en `classifier.js` y añade el caso a las pruebas. |
-| Quiero volver a responder un hilo | «Olvidar hilos ya respondidos», en Horario y límites. |
+| Quiero reprocesar un hilo | «Olvidar hilos ya respondidos», en Horario y límites. |
 
 ---
 
@@ -130,7 +137,8 @@ sitio.
 extension/
   classifier.js       La única decisión: ¿es genérico o es para ti?
   classifier.test.js  node --test, sin dependencias
-  content.js          Recorre la bandeja, abre sólo lo que responde, escribe
+  content.js          Recorre la carpeta, abre sólo lo que responde, escribe,
+                      y devuelve a no leído lo que no
   background.js       Contador del icono y valores por defecto
   popup.*             Copy, horario, límites, diagnóstico y registro
 ops/

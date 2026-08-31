@@ -187,39 +187,39 @@ async function diagnose() {
   button.textContent = "Revisando…";
   result.hidden = false;
   result.className = "result";
-  result.textContent = "Leyendo la bandeja…";
+  result.textContent = "Leyendo la lista…";
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const report = await chrome.tabs.sendMessage(tab.id, { action: "DIAGNOSE" });
+    if (!tab?.id) throw new Error("No hay pestaña activa.");
 
+    const report = await chrome.tabs.sendMessage(tab.id, { action: "DIAGNOSE" });
     if (!report) throw new Error("Sin respuesta de la página.");
 
-    const cabecera =
-      `Hilos detectados: ${report.total}\n` +
-      `Sin leer: ${report.unread}\n` +
-      `Se responderían ahora: ${report.wouldReply}\n`;
-
-    // Con 0 filas el resumen trae la sonda del DOM: es lo que hace falta
-    // para arreglar los selectores, así que se copia solo al portapapeles.
-    const cuerpo = report.total === 0 ? `\n${report.resumen}` : "";
+    // Un content script viejo responde con otra forma. Distinguirlo aquí evita
+    // horas de depurar un comportamiento que ya estaba corregido en disco.
+    if (!report.version || typeof report.resumen !== "string") {
+      throw new Error(
+        "La pestaña tiene una versión ANTIGUA del script. Recarga la página " +
+          "con ⌘R (el content script sólo se sustituye al cargar la página, " +
+          "no al recargar la extensión) y vuelve a entrar en la carpeta Marketplace."
+      );
+    }
 
     result.className = report.wouldReply > 0 ? "result result--ok" : "result";
-    result.textContent = cabecera + cuerpo;
+    result.textContent = report.resumen;
 
-    if (report.total === 0) {
-      try {
-        await navigator.clipboard.writeText(cabecera + cuerpo);
-        result.textContent += "\n\n📋 Copiado al portapapeles — pégalo en el chat.";
-      } catch {
-        result.textContent += "\n\n(Selecciona el texto de arriba y cópialo.)";
-      }
+    try {
+      await navigator.clipboard.writeText(report.resumen);
+      result.textContent += "\n\n📋 Copiado al portapapeles.";
+    } catch {
+      result.textContent += "\n\n(Selecciona el texto y cópialo.)";
     }
   } catch (err) {
     result.className = "result result--error";
     result.textContent =
-      "No se pudo leer la bandeja. Abre https://www.facebook.com/marketplace/inbox " +
-      "en esta pestaña y recárgala.\n\n" +
+      "No se pudo leer la lista. Abre https://www.facebook.com/messages en esta " +
+      "pestaña, entra en la carpeta «Marketplace» y recárgala con ⌘R.\n\n" +
       `(${err.message})`;
   } finally {
     button.disabled = false;
@@ -251,7 +251,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   $("forgetBtn").addEventListener("click", async () => {
-    await chrome.storage.local.set({ handledThreads: {} });
+    await chrome.storage.local.set({ handledThreads: {}, reviewedThreads: {} });
     await refreshLog();
     $("saveState").textContent = "Historial de hilos borrado";
   });

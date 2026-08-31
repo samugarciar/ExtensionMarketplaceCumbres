@@ -20,8 +20,6 @@ const DEFAULTS = {
   minSecondsBetweenReplies: 120,
   minPreReplyDelayMs: 12000,
   maxPreReplyDelayMs: 25000,
-  minCharDelayMs: 40,
-  maxCharDelayMs: 110,
   verboseLogs: false
 };
 

@@ -14,7 +14,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUN_DIR="$PROJECT_DIR/.run"
 PID_FILE="$RUN_DIR/caffeinate.pid"
-INBOX_URL="https://www.facebook.com/marketplace/inbox"
+INBOX_URL="https://www.facebook.com/messages"
 
 mkdir -p "$RUN_DIR"
 
@@ -38,12 +38,14 @@ case "${1:-start}" in
     fi
 
     open -a "Google Chrome" "$INBOX_URL" 2>/dev/null \
-      && ok "Bandeja de Marketplace abierta en Chrome." \
+      && ok "Messenger abierto en Chrome." \
       || warn "No se pudo abrir Chrome. Ábrelo a mano en $INBOX_URL"
 
     echo
-    ok "Listo. Abre el popup de la extensión y enciende el interruptor."
-    warn "Chrome debe quedarse abierto, en la bandeja y con la sesión iniciada."
+    ok "Listo. Ahora, en Messenger:"
+    echo "     1. Clic en la carpeta «Marketplace» de la lista de chats."
+    echo "     2. Abre el popup de la extensión y enciende el interruptor."
+    warn "Chrome debe quedarse abierto, DENTRO de la carpeta y con la sesión iniciada."
     ;;
 
   stop)

@@ -1,38 +1,72 @@
 /**
- * Content script: recorre la bandeja, responde sólo las preguntas genéricas de
- * disponibilidad y no toca nada más.
+ * Content script: atiende la carpeta Marketplace de Messenger.
  *
- * La regla que gobierna todo el archivo: **un hilo que no se va a responder no
- * se abre**. Clasificamos leyendo la vista previa de la lista; sólo entramos a
- * los hilos que ya sabemos que vamos a contestar. Así el resto se queda sin
- * leer de forma natural, sin necesidad de "marcar como no leído" ni de dejar
- * rastro de apertura.
+ * Regla única: si el mensaje es SÓLO una pregunta de disponibilidad, se
+ * responde con el copy. Cualquier otra cosa se queda sin leer, esperando.
+ *
+ * Por qué Messenger y no la bandeja de Marketplace (facebook.com/marketplace/
+ * inbox), verificado contra ambas interfaces:
+ *
+ *   - Allí la vista previa oculta el texto del comprador tras "X te envió un
+ *     mensaje sobre tu publicación" en la mitad de los leads. Aquí siempre se
+ *     ve el mensaje completo.
+ *   - Allí no hay identificador de hilo en el DOM. Aquí está en el href.
+ *   - Allí el estado "no leído" no es detectable. Aquí es el texto
+ *     "Mensaje no leído:".
+ *   - Allí no existe "marcar como no leído" en ningún menú. Aquí sí.
+ *   - Allí las conversaciones se abren en ventanas flotantes que se cierran
+ *     solas al abrir otra, lo que llegó a romper un envío a medias. Aquí hay un
+ *     único panel estable.
  */
 
 (() => {
   "use strict";
 
   // ======================================================================
-  // Selectores frágiles — Facebook renombra clases, no roles ARIA.
+  // Selectores frágiles — Facebook renombra clases, no roles ni aria-labels.
   // Si algo deja de funcionar tras un rediseño, se parchea AQUÍ.
   // ======================================================================
   const SELECTORS = {
-    threadLink: 'a[href*="/marketplace/t/"], a[href*="/messages/t/"], a[href*="/t/"]',
-    textNode: '[dir="auto"]',
+    threadLink: 'a[href*="/t/"]',
+    rowMenuButton: '[aria-label^="Más opciones para"], [aria-label^="More options for"]',
+    menuItem: '[role="menuitem"]',
     textbox: '[role="textbox"][contenteditable="true"]',
-    messageRow: '[role="row"]',
-    main: '[role="main"]',
+    conversation: '[aria-label^="Mensajes de la conversación"], [aria-label^="Messages in conversation"]',
     button: '[aria-label][role="button"]'
   };
 
-  const UNREAD_HINTS = ["no leído", "no leido", "sin leer", "unread", "mensaje nuevo"];
-  const SEND_LABELS = ["enviar", "send", "presiona enter para enviar", "press enter to send"];
-  const OUTGOING_HINTS = ["you sent", "tú enviaste", "tu enviaste", "enviaste", "has enviado"];
+  /** Marca de no leído dentro de la fila. */
+  const UNREAD = /mensaje no le[íi]do|unread message/i;
 
-  // Líneas de la fila que son marca de tiempo, no el mensaje: "2 h", "ayer", "3 sept".
-  const TIMESTAMP_RE =
-    /^(·\s*)?(\d+\s*(m|min|h|hr|d|sem|a|y|w)\b|ayer|hoy|lun|mar|mié|mie|jue|vie|sáb|sab|dom|\d{1,2}\s+\w{3,4}\.?)$/i;
+  /** "A las 2:11 pm, Alannys: ¿Sigue estando disponible este artículo?" */
+  const MSG_LABEL = /^A las .+?,\s*([^:]+):\s*([\s\S]*)$/;
 
+  /** Facebook nombra al emisor propio como "Tú". */
+  const OWN_SENDER = /^(t[úu]|you)$/i;
+
+  /** Opción del menú de fila que devuelve la conversación a no leída. */
+  const MARK_UNREAD = /marcar como no le[íi]do|mark as unread/i;
+
+  /**
+   * El compositor no tiene botón "Enviar": sólo "Enviar un clip de voz" y
+   * "Enviar un Me gusta". Emparejar por prefijo mandaría una nota de voz, así
+   * que la comparación es exacta.
+   */
+  const SEND_EXACT = ["enviar", "send"];
+
+  /** Líneas de la fila que no son el mensaje. */
+  const TIME_LINE = /^(·|\d{1,2}:\d{2}\s*(a\.?\s?m\.?|p\.?\s?m\.?)?|\d+\s*(m|min|h|d|sem|a)\b.*|ayer|hoy|activo ahora|lun|mar|mié|mie|jue|vie|sáb|sab|dom)$/i;
+
+  const LOG_PREFIX = "[LeadRouter]";
+
+  /**
+   * Versión del content script. Súbela en cada cambio de comportamiento.
+   *
+   * Los content scripts sobreviven a la recarga de la extensión hasta que se
+   * recarga la PÁGINA, así que es fácil creer que corre código nuevo cuando no.
+   * Ya pasó dos veces; con esto se ve de un vistazo en el popup y la consola.
+   */
+  const VERSION = "messenger-3";
   const DEFAULTS = {
     enabled: false,
     replyCopy: "",
@@ -43,19 +77,34 @@
     minSecondsBetweenReplies: 120,
     minPreReplyDelayMs: 12000,
     maxPreReplyDelayMs: 25000,
-    minCharDelayMs: 40,
-    maxCharDelayMs: 110,
     verboseLogs: false
   };
 
-  const LOG_PREFIX = "[LeadRouter]";
   let config = { ...DEFAULTS };
   let busy = false;
+
+  /** Hilos ya anunciados en el log esta sesión: evita repetir cada 20 s. */
+  const yaAnunciados = new Set();
+
+  /**
+   * Fallos de mecánica por hilo (panel que no abre, foco que no se recupera).
+   * No dicen nada sobre el mensaje del comprador, así que no pueden condenar el
+   * hilo: se reintenta. En memoria a propósito — recargar da borrón y cuenta nueva.
+   */
+  const fallosTecnicos = new Map();
+  const MAX_FALLOS_TECNICOS = 3;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
   const log = (...args) => config.verboseLogs && console.log(LOG_PREFIX, ...args);
   const warn = (...args) => console.warn(LOG_PREFIX, ...args);
+  const normLabel = (text) => (text || "").toLowerCase().replace(/\s+/g, " ").trim();
+
+  async function report(level, message) {
+    // A la consola siempre: es lo único observable sin abrir el popup.
+    console.log(`${LOG_PREFIX} [${level}] ${message}`);
+    await chrome.runtime.sendMessage({ action: "LOG", data: { level, message } }).catch(() => {});
+  }
 
   // ======================================================================
   // Configuración y estado persistente
@@ -74,33 +123,44 @@
     }
   });
 
-  async function isHandled(threadId) {
-    const { handledThreads = {} } = await chrome.storage.local.get("handledThreads");
-    return Boolean(handledThreads[threadId]);
+  async function readMap(clave) {
+    const data = await chrome.storage.local.get(clave);
+    return data[clave] || {};
   }
 
-  async function markHandled(threadId) {
-    const { handledThreads = {} } = await chrome.storage.local.get("handledThreads");
-    handledThreads[threadId] = Date.now();
-
-    // Se conservan 30 días: suficiente para no repetir, sin crecer sin fin.
+  async function writeMap(clave, mapa) {
     const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    for (const [id, at] of Object.entries(handledThreads)) {
-      if (at < cutoff) delete handledThreads[id];
+    for (const [id, info] of Object.entries(mapa)) {
+      const at = typeof info === "number" ? info : info?.at || 0;
+      if (at < cutoff) delete mapa[id];
     }
-    await chrome.storage.local.set({ handledThreads });
+    await chrome.storage.local.set({ [clave]: mapa });
+  }
+
+  const isHandled = async (id) => Boolean((await readMap("handledThreads"))[id]);
+  const isReviewed = async (id) => Boolean((await readMap("reviewedThreads"))[id]);
+
+  async function markHandled(id) {
+    const mapa = await readMap("handledThreads");
+    mapa[id] = Date.now();
+    await writeMap("handledThreads", mapa);
+  }
+
+  async function markReviewed(id, motivo) {
+    const mapa = await readMap("reviewedThreads");
+    mapa[id] = { at: Date.now(), motivo };
+    await writeMap("reviewedThreads", mapa);
   }
 
   async function recentReplies() {
     const { replyTimestamps = [] } = await chrome.storage.local.get("replyTimestamps");
-    const cutoff = Date.now() - 60 * 60 * 1000;
-    return replyTimestamps.filter((at) => at > cutoff);
+    return replyTimestamps.filter((at) => at > Date.now() - 60 * 60 * 1000);
   }
 
   async function recordReply() {
-    const recent = await recentReplies();
-    recent.push(Date.now());
-    await chrome.storage.local.set({ replyTimestamps: recent });
+    const recientes = await recentReplies();
+    recientes.push(Date.now());
+    await chrome.storage.local.set({ replyTimestamps: recientes });
   }
 
   // ======================================================================
@@ -110,13 +170,15 @@
   function withinActiveHours(now = new Date()) {
     const { activeHoursStart: start, activeHoursEnd: end } = config;
     const hour = now.getHours();
-    if (start === end) return true; // configuración sin ventana: siempre activo
+    if (start === end) return true;
     return start < end ? hour >= start && hour < end : hour >= start || hour < end;
   }
 
   async function gateCheck() {
     if (!config.enabled) return { ok: false, reason: "Extensión apagada" };
-    if (!config.replyCopy.trim()) return { ok: false, reason: "Falta el copy en el popup" };
+    if (!String(config.replyCopy || "").trim()) {
+      return { ok: false, reason: "Falta el copy en el popup" };
+    }
     if (!withinActiveHours()) {
       return {
         ok: false,
@@ -124,25 +186,24 @@
       };
     }
 
-    const recent = await recentReplies();
-    if (recent.length >= config.maxRepliesPerHour) {
-      return { ok: false, reason: `Cupo por hora alcanzado (${recent.length})` };
+    const recientes = await recentReplies();
+    if (recientes.length >= config.maxRepliesPerHour) {
+      return { ok: false, reason: `Cupo por hora alcanzado (${recientes.length})` };
     }
 
-    const last = recent.length ? Math.max(...recent) : 0;
-    const elapsed = (Date.now() - last) / 1000;
-    if (last && elapsed < config.minSecondsBetweenReplies) {
+    const ultimo = recientes.length ? Math.max(...recientes) : 0;
+    const transcurrido = (Date.now() - ultimo) / 1000;
+    if (ultimo && transcurrido < config.minSecondsBetweenReplies) {
       return {
         ok: false,
-        reason: `Espaciado mínimo: faltan ${Math.ceil(config.minSecondsBetweenReplies - elapsed)} s`
+        reason: `Espaciado mínimo: faltan ${Math.ceil(config.minSecondsBetweenReplies - transcurrido)} s`
       };
     }
-
     return { ok: true };
   }
 
   // ======================================================================
-  // Lectura de la bandeja
+  // Lectura de la lista de conversaciones
   // ======================================================================
 
   function threadIdFrom(href) {
@@ -150,135 +211,232 @@
     return match ? match[1] : null;
   }
 
-  function listRows() {
-    const links = Array.from(document.querySelectorAll(SELECTORS.threadLink));
-    const seen = new Set();
-    const rows = [];
-
-    for (const link of links) {
-      const threadId = threadIdFrom(link.getAttribute("href"));
-      if (!threadId || seen.has(threadId)) continue;
-      seen.add(threadId);
-      rows.push({ threadId, element: link });
-    }
-    return rows;
-  }
-
-  /**
-   * ¿La fila está sin leer?
-   *
-   * Dos señales: la etiqueta ARIA (cuando existe) y el grosor de la fuente,
-   * porque Messenger pone la vista previa en negrita mientras no se ha leído.
-   */
-  function isUnread(element) {
-    const labels = [element, ...element.querySelectorAll("[aria-label]")]
-      .map((node) => (node.getAttribute("aria-label") || "").toLowerCase())
-      .join(" ");
-    if (UNREAD_HINTS.some((hint) => labels.includes(hint))) return true;
-
-    const textNodes = Array.from(element.querySelectorAll(SELECTORS.textNode));
-    return textNodes.some((node) => {
-      const weight = window.getComputedStyle(node).fontWeight;
-      return Number(weight) >= 600 && (node.innerText || "").trim().length > 0;
-    });
-  }
-
-  /** Todas las líneas de texto de la fila, sin marcas de tiempo. */
-  function rowLines(element) {
-    const fromNodes = Array.from(element.querySelectorAll(SELECTORS.textNode))
-      .map((node) => (node.innerText || "").trim())
+  function textLines(element) {
+    return (element.innerText || "")
+      .split("\n")
+      .map((line) => line.trim())
       .filter(Boolean);
-
-    const lines = fromNodes.length
-      ? fromNodes
-      : (element.innerText || "").split("\n").map((line) => line.trim()).filter(Boolean);
-
-    return lines.filter((line) => !TIMESTAMP_RE.test(line));
   }
 
   /**
-   * ¿La vista previa es nuestra propia respuesta?
+   * Descompone una fila de la carpeta Marketplace. Estructura verificada:
+   *   [0] "Mateo · 3 habitaciones 2 baños Departamento/condominio"
+   *   [1] "Mensaje no leído:"        (sólo si está sin leer)
+   *   [2] "Mateo: Hola. ¿Sigue estando disponible?"
+   *   [3] "·"
+   *   [4] "4 min"
+   */
+  function parseRow(link) {
+    const threadId = threadIdFrom(link.getAttribute("href"));
+    if (!threadId) return null;
+
+    const lineas = textLines(link);
+    if (lineas.length < 2) return null;
+
+    const titulo = lineas[0];
+    // Los hilos de Marketplace se titulan "<comprador> · <inmueble>". Los chats
+    // personales no llevan ese separador, y así quedan fuera sin tocarlos.
+    if (!titulo.includes(" · ")) return null;
+
+    const mensaje =
+      lineas
+        .slice(1)
+        .find((linea) => !UNREAD.test(linea) && !TIME_LINE.test(linea)) || "";
+
+    let contenedor = link;
+    for (let i = 0; i < 6 && contenedor.parentElement; i += 1) {
+      contenedor = contenedor.parentElement;
+    }
+
+    return {
+      threadId,
+      element: link,
+      titulo,
+      nombre: titulo.split(" · ")[0].trim(),
+      mensaje,
+      unread: UNREAD.test(link.innerText || ""),
+      menuButton: contenedor.querySelector(SELECTORS.rowMenuButton)
+    };
+  }
+
+  function listRows() {
+    const filas = [];
+    const vistos = new Set();
+    for (const link of document.querySelectorAll(SELECTORS.threadLink)) {
+      const fila = parseRow(link);
+      if (!fila || vistos.has(fila.threadId)) continue;
+      vistos.add(fila.threadId);
+      filas.push(fila);
+    }
+    return filas;
+  }
+
+  /** ¿El último mensaje del hilo lo escribimos nosotros? */
+  function isOwnReply(mensaje) {
+    if (/^t[úu]\s*:/i.test(mensaje || "")) return true;
+
+    const copy = String(config.replyCopy || "").trim();
+    if (!copy || !mensaje) return false;
+
+    const norm = (t) =>
+      t.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
+
+    // La vista previa antepone "Tú: " o el nombre; se compara el cuerpo.
+    const cuerpo = norm(mensaje).replace(/^[^:]{1,40}:\s*/, "");
+    const cabeza = norm(copy).slice(0, 25);
+    return cabeza.length >= 10 && cuerpo.startsWith(cabeza);
+  }
+
+  /** ¿Está abierta la carpeta Marketplace? Sin ella no hay hilos que leer. */
+  function folderLooksClosed() {
+    return (
+      listRows().length === 0 &&
+      [...document.querySelectorAll('[role="row"]')].some(
+        (r) => /marketplace/i.test(r.innerText || "") && /mensajes? nuevos?/i.test(r.innerText || "")
+      )
+    );
+  }
+
+  // ======================================================================
+  // Lectura de la conversación abierta
+  // ======================================================================
+
+  function findConversation(titulo) {
+    const wanted = normLabel(titulo);
+    return (
+      [...document.querySelectorAll(SELECTORS.conversation)].find((win) =>
+        normLabel(win.getAttribute("aria-label")).endsWith(wanted)
+      ) || null
+    );
+  }
+
+  function findTextboxFor(titulo) {
+    const wanted = normLabel(titulo);
+    const visibles = [...document.querySelectorAll(SELECTORS.textbox)].filter(
+      (box) => box.offsetParent !== null
+    );
+    // Preferente: la caja que declara a qué conversación pertenece.
+    const exacta = visibles.find((box) => normLabel(box.getAttribute("aria-label")).endsWith(wanted));
+    // En Messenger hay un solo panel, así que una única caja visible es segura.
+    return exacta || (visibles.length === 1 ? visibles[0] : null);
+  }
+
+  /** Mensajes del panel, en orden, con su emisor. */
+  function readMessages(win) {
+    const mensajes = [];
+    const vistos = new Set();
+
+    for (const el of win.querySelectorAll("[aria-label]")) {
+      const match = (el.getAttribute("aria-label") || "").match(MSG_LABEL);
+      if (!match) continue;
+
+      const quien = match[1].trim();
+      const texto = match[2].trim();
+      if (!texto || /inici[óo] este chat/i.test(texto)) continue;
+
+      const clave = `${quien}::${texto}`;
+      if (vistos.has(clave)) continue;
+      vistos.add(clave);
+
+      mensajes.push({ quien, texto, propio: OWN_SENDER.test(quien) });
+    }
+    return mensajes;
+  }
+
+  function lastIncomingMessage(win) {
+    const mensajes = readMessages(win);
+    const ultimo = mensajes[mensajes.length - 1];
+    return ultimo && !ultimo.propio ? ultimo.texto : null;
+  }
+
+  function alreadyAnswered(win) {
+    return readMessages(win).some(
+      (m) => m.propio && /wa\.me\/|api\.whatsapp\.com/i.test(m.texto)
+    );
+  }
+
+  // ======================================================================
+  // Devolver a "no leído"
+  // ======================================================================
+
+  async function closeAnyMenu() {
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })
+    );
+    await sleep(300);
+  }
+
+  /**
+   * Devuelve la conversación al estado "no leído".
    *
-   * En la bandeja, el último mensaje de un hilo ya contestado es el nuestro, y
-   * su vista previa empieza igual que el copy. Compararla con el propio copy
-   * es más fiable que confiar sólo en la marca de "sin leer".
+   * Es la razón de haber movido todo a Messenger: la bandeja de Marketplace no
+   * ofrece esta acción en ninguno de sus menús.
    */
-  function looksLikeOwnReply(preview) {
-    const copy = (config.replyCopy || "").trim();
-    if (!copy || !preview) return false;
+  async function markAsUnread(threadId, nombre) {
+    let motivo = "motivo desconocido";
+    let vistos = [];
 
-    const normalize = (text) =>
-      text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/\s+/g, " ").trim();
+    // Un menú abierto de antes convertiría el clic siguiente en un cierre.
+    await closeAnyMenu();
 
-    const head = normalize(copy).slice(0, 25);
-    return head.length >= 10 && normalize(preview).startsWith(head);
-  }
+    for (let intento = 1; intento <= 2; intento += 1) {
+      const fila = listRows().find((r) => r.threadId === threadId);
+      if (!fila) {
+        motivo = "la fila ya no aparece en la lista";
+        await sleep(700);
+        continue;
+      }
+      if (!fila.menuButton) {
+        motivo = "la fila no expone el botón «Más opciones»";
+        await sleep(700);
+        continue;
+      }
 
-  /**
-   * La vista previa del mensaje es la última línea de la fila: antes van el
-   * nombre del comprador y el título de la publicación.
-   */
-  function extractPreview(element) {
-    const lines = rowLines(element);
-    return lines.length ? lines[lines.length - 1] : "";
-  }
+      // Una fila fuera del viewport puede no responder al clic.
+      try {
+        fila.element.scrollIntoView({ block: "center" });
+      } catch {
+        /* da igual si no se puede */
+      }
+      await sleep(400);
 
-  // ======================================================================
-  // Lectura del hilo abierto (verificación antes de escribir)
-  // ======================================================================
+      fila.menuButton.click();
+      const opcion = await waitFor(
+        () =>
+          [...document.querySelectorAll(SELECTORS.menuItem)].find((x) =>
+            MARK_UNREAD.test(x.innerText || "")
+          ),
+        6000
+      );
 
-  function classifyDirection(row, containerRect) {
-    const labels = [row, ...row.querySelectorAll("[aria-label]")]
-      .map((node) => (node.getAttribute("aria-label") || "").toLowerCase())
-      .join(" ");
-    if (OUTGOING_HINTS.some((hint) => labels.includes(hint))) return "out";
+      if (opcion) {
+        opcion.click();
+        await sleep(900);
+        return true;
+      }
 
-    const rect = row.getBoundingClientRect();
-    if (!rect.width || !containerRect.width) return "out";
+      // Qué SÍ ofrecía el menú: con esto el próximo fallo se diagnostica solo.
+      vistos = [...document.querySelectorAll(SELECTORS.menuItem)]
+        .map((x) => (x.innerText || "").trim())
+        .filter(Boolean)
+        .slice(0, 6);
+      motivo = vistos.length
+        ? `el menú no ofreció "Marcar como no leído" (tenía: ${vistos.join(", ")})`
+        : "el menú no llegó a abrirse";
 
-    const offset = rect.left + rect.width / 2 - (containerRect.left + containerRect.width / 2);
-    // Una burbuja centrada (separador de fecha) no permite decidir: se descarta.
-    if (Math.abs(offset) < containerRect.width * 0.08) return "out";
-    return offset > 0 ? "out" : "in";
-  }
+      await closeAnyMenu();
+      await sleep(600);
+    }
 
-  /** Texto del último mensaje entrante del hilo abierto, o null. */
-  function lastIncomingMessage() {
-    const main = document.querySelector(SELECTORS.main);
-    if (!main) return null;
-
-    const containerRect = main.getBoundingClientRect();
-    const rows = Array.from(main.querySelectorAll(SELECTORS.messageRow)).filter(
-      (row) => (row.innerText || "").trim()
-    );
-    if (!rows.length) return null;
-
-    const last = rows[rows.length - 1];
-    if (classifyDirection(last, containerRect) !== "in") return null;
-
-    const bubble = Array.from(last.querySelectorAll(SELECTORS.textNode)).find((node) =>
-      (node.innerText || "").trim()
-    );
-    return ((bubble || last).innerText || "").trim();
-  }
-
-  function alreadyAnswered() {
-    const main = document.querySelector(SELECTORS.main);
-    if (!main) return false;
-
-    const containerRect = main.getBoundingClientRect();
-    return Array.from(main.querySelectorAll(SELECTORS.messageRow)).some(
-      (row) =>
-        classifyDirection(row, containerRect) === "out" &&
-        /wa\.me\/|api\.whatsapp\.com/i.test(row.innerText || "")
-    );
+    await report("warn", `${nombre}: no se pudo devolver a no leído — ${motivo}.`);
+    return false;
   }
 
   // ======================================================================
   // Escritura
   // ======================================================================
 
-  async function waitFor(predicate, timeoutMs = 8000, stepMs = 250) {
+  async function waitFor(predicate, timeoutMs = 10000, stepMs = 300) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const value = predicate();
@@ -288,114 +446,244 @@
     return null;
   }
 
-  function findTextbox() {
-    return (
-      Array.from(document.querySelectorAll(SELECTORS.textbox))
-        .reverse()
-        .find((box) => box.offsetParent !== null) || null
-    );
+  const sameText = (a, b) =>
+    (a || "").replace(/ /g, " ").replace(/\s+/g, " ").trim() ===
+    (b || "").replace(/ /g, " ").replace(/\s+/g, " ").trim();
+
+  /**
+   * Cursor al FINAL. `focus()` por sí solo lo devuelve al principio, y entonces
+   * lo que se escriba después se inserta delante de lo ya escrito. Ese fue el
+   * fallo que mandó un mensaje mutilado a un comprador real.
+   */
+  function caretToEnd(el) {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
   }
 
-  function findSendButton() {
-    return (
-      Array.from(document.querySelectorAll(SELECTORS.button)).find((button) => {
-        const label = (button.getAttribute("aria-label") || "").toLowerCase();
-        return SEND_LABELS.some((candidate) => label === candidate || label.startsWith(candidate));
-      }) || null
-    );
-  }
-
-  async function humanType(textbox, text) {
-    textbox.focus();
-    document.execCommand("selectAll", false, null);
-    document.execCommand("delete", false, null);
-
-    for (const char of text) {
-      if (char === "\n") {
-        // insertText con "\n" puede enviar el mensaje a medias en Lexical.
-        document.execCommand("insertLineBreak", false, null);
-        await sleep(rand(200, 420));
-        continue;
+  /**
+   * Vacía el compositor y COMPRUEBA que quedó vacío.
+   *
+   * La versión anterior daba por hecho que `selectAll + delete` funcionaba, y
+   * cuando no, dejaba medio copy como borrador visible en la bandeja.
+   */
+  async function clearComposer(textbox) {
+    for (let intento = 0; intento < 3; intento += 1) {
+      try {
+        textbox.focus();
+        const range = document.createRange();
+        range.selectNodeContents(textbox);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        document.execCommand("delete", false, null);
+        await sleep(200);
+        if ((textbox.innerText || "").trim() === "") return true;
+      } catch {
+        return false;
       }
-      document.execCommand("insertText", false, char);
-      let delay = rand(config.minCharDelayMs, config.maxCharDelayMs);
-      if (".,!?:".includes(char)) delay += rand(120, 320);
-      await sleep(delay);
     }
+    return (textbox.innerText || "").trim() === "";
   }
 
-  async function submit(textbox) {
-    await sleep(rand(700, 1600));
+  async function ensureFocus(titulo) {
+    for (let intento = 0; intento < 6; intento += 1) {
+      const box = findTextboxFor(titulo);
+      if (box && box.isConnected) {
+        const enfocado = () =>
+          document.activeElement === box || box.contains(document.activeElement);
+        if (enfocado()) return box;
+        box.focus();
+        caretToEnd(box);
+        await sleep(80);
+        if (enfocado()) return box;
+      }
+      await sleep(200);
+    }
+    return null;
+  }
 
-    const button = findSendButton();
-    if (button) {
-      button.click();
-    } else {
-      const options = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
-      textbox.dispatchEvent(new KeyboardEvent("keydown", options));
-      textbox.dispatchEvent(new KeyboardEvent("keyup", options));
+  /**
+   * Inserta el texto de una vez simulando un pegado.
+   *
+   * Escribir por trozos no funciona aquí: al empezar a teclear, Messenger
+   * retira el panel de "respuesta rápida" y re-renderiza el compositor. Lexical
+   * se reinicializa, `execCommand` deja de surtir efecto EN SILENCIO, y el
+   * mensaje se queda congelado en los ~120 caracteres que hubiera en ese
+   * instante. Ocurría siempre en el mismo punto, lo que delató la causa.
+   *
+   * Un pegado es atómico: Lexical lo procesa entero, con saltos de línea
+   * incluidos, sin dejar ninguna ventana para que algo se interponga.
+   */
+  function pasteInto(textbox, text) {
+    const dt = new DataTransfer();
+    dt.setData("text/plain", text);
+    textbox.dispatchEvent(
+      new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true })
+    );
+  }
+
+  async function humanType(titulo, text) {
+    const textbox = await ensureFocus(titulo);
+    if (!textbox) return { ok: false, reason: "no se pudo enfocar el editor" };
+
+    await clearComposer(textbox);
+    await ensureFocus(titulo);
+    pasteInto(textbox, text);
+
+    // Lexical procesa el pegado de forma asíncrona.
+    const listo = await waitFor(
+      () => sameText(textbox.innerText || "", text),
+      4000,
+      200
+    );
+
+    if (!listo) {
+      return {
+        ok: false,
+        reason: `el editor no aceptó el texto completo (${(textbox.innerText || "").length} de ${text.length})`,
+        textbox
+      };
     }
 
-    // El editor se vacía cuando el mensaje sale de verdad.
-    return Boolean(await waitFor(() => (textbox.innerText || "").trim() === "", 4000, 300));
+    // Una pausa breve antes de enviar: leerlo antes de darle a Enter.
+    await sleep(rand(600, 1400));
+    return { ok: true, textbox };
+  }
+
+  function findSendButton(win) {
+    return (
+      [...win.querySelectorAll(SELECTORS.button)].find((b) =>
+        SEND_EXACT.includes(normLabel(b.getAttribute("aria-label")))
+      ) || null
+    );
+  }
+
+  async function submit(win, textbox) {
+    await sleep(rand(700, 1600)); // relectura antes de enviar
+
+    const boton = findSendButton(win);
+    if (boton) {
+      boton.click();
+    } else {
+      const opts = { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true };
+      textbox.dispatchEvent(new KeyboardEvent("keydown", opts));
+      textbox.dispatchEvent(new KeyboardEvent("keyup", opts));
+    }
+    return Boolean(await waitFor(() => (textbox.innerText || "").trim() === "", 5000, 300));
   }
 
   // ======================================================================
   // Orquestación
   // ======================================================================
 
-  async function report(level, message) {
-    await chrome.runtime.sendMessage({ action: "LOG", data: { level, message } }).catch(() => {});
+  async function technicalFailure(threadId, nombre, motivo) {
+    const intentos = (fallosTecnicos.get(threadId) || 0) + 1;
+    fallosTecnicos.set(threadId, intentos);
+
+    if (intentos >= MAX_FALLOS_TECNICOS) {
+      await markReviewed(threadId, `fallo técnico repetido: ${motivo}`);
+      await report("error", `${nombre}: ${motivo} (${intentos} intentos). Se deja de reintentar.`);
+    } else {
+      await report("warn", `${nombre}: ${motivo}. Reintento ${intentos} de ${MAX_FALLOS_TECNICOS}.`);
+    }
+    return false;
   }
 
-  async function replyToThread(candidate) {
-    const { threadId, element, preview } = candidate;
+  async function replyToThread(row) {
+    const { threadId, titulo, nombre } = row;
 
-    log(`Abriendo el hilo ${threadId}…`);
-    element.click();
-
-    const textbox = await waitFor(findTextbox, 10000);
-    if (!textbox) {
-      await report("error", `No se pudo abrir el editor del hilo ${threadId}`);
-      return false;
-    }
-
-    // Verificación con el texto completo: la vista previa pudo omitir algo.
-    const fullText = lastIncomingMessage();
-    if (fullText) {
-      const verdict = LeadClassifier.classify(fullText);
-      if (!verdict.autoReply) {
-        await report(
-          "warn",
-          `El hilo ${threadId} se abrió pero el mensaje completo no es genérico ` +
-            `(${verdict.reason}). Respóndelo tú; ya figura como leído.`
-        );
-        return false;
-      }
-    }
-
-    if (alreadyAnswered()) {
-      await report("info", `El hilo ${threadId} ya tenía respuesta con enlace de WhatsApp`);
-      await markHandled(threadId);
-      return false;
-    }
-
-    // Pausa antes de escribir: no se responde en el mismo segundo en que se abre.
+    // La pausa humana va ANTES de abrir: cuanto menos tiempo pase entre abrir
+    // y escribir, menos ocasiones hay de que algo interrumpa.
     await sleep(rand(config.minPreReplyDelayMs, config.maxPreReplyDelayMs));
 
-    await humanType(textbox, config.replyCopy.trim());
-    const delivered = await submit(textbox);
+    const fresca = listRows().find((r) => r.threadId === threadId);
+    if (!fresca) return technicalFailure(threadId, nombre, "la conversación desapareció de la lista");
 
-    if (delivered) {
+    log(`Abriendo la conversación de ${nombre}…`);
+    fresca.element.click();
+
+    const win = await waitFor(() => findConversation(titulo), 12000);
+    if (!win) return technicalFailure(threadId, nombre, "no se abrió la conversación");
+
+    const textbox = await waitFor(() => findTextboxFor(titulo), 8000);
+    if (!textbox) return technicalFailure(threadId, nombre, "no apareció el editor");
+
+    if (alreadyAnswered(win)) {
       await markHandled(threadId);
+      await report("info", `${nombre} ya tenía respuesta con enlace de WhatsApp.`);
+      return false;
+    }
+
+    // Verificación con el texto completo del panel. La lista ya trae el mensaje
+    // entero, así que casi siempre coincidirá; esto es la última red.
+    const completo = lastIncomingMessage(win);
+    if (!completo) {
+      await markAsUnread(threadId, nombre);
+      await markReviewed(threadId, "no se pudo leer el mensaje");
+      await report("para-ti", `${nombre}: no se pudo leer el mensaje. Devuelto a no leído.`);
+      return false;
+    }
+
+    const verdict = LeadClassifier.classify(completo);
+    if (!verdict.autoReply) {
+      const devuelto = await markAsUnread(threadId, nombre);
+      await markReviewed(threadId, verdict.reason);
+      await report(
+        "para-ti",
+        `${nombre}: "${completo.slice(0, 70)}" — ${verdict.reason}.` +
+          (devuelto ? " Devuelto a no leído." : " NO se pudo devolver a no leído.")
+      );
+      return false;
+    }
+
+    const copy = String(config.replyCopy).trim();
+    const typing = await humanType(titulo, copy);
+    if (!typing.ok) {
+      const limpio = typing.textbox ? await clearComposer(typing.textbox) : true;
+      return technicalFailure(
+        threadId,
+        nombre,
+        typing.reason + (limpio ? "" : " (⚠️ quedó un borrador, bórralo a mano)")
+      );
+    }
+
+    // Nunca se envía algo que no sea EXACTAMENTE el copy.
+    const compuesto = typing.textbox.innerText || "";
+    if (!sameText(compuesto, copy)) {
+      const limpio = await clearComposer(typing.textbox);
+      await markReviewed(threadId, "el texto compuesto no coincidía con el copy");
+      await report(
+        "error",
+        `${nombre}: el editor quedó con un texto distinto al copy ` +
+          `(${compuesto.length} de ${copy.length} caracteres). Descartado sin enviar.` +
+          (limpio ? "" : " ⚠️ Quedó un borrador en ese chat: bórralo a mano.")
+      );
+      return false;
+    }
+
+    // Se marca ANTES de enviar: un duplicado es peor que una respuesta perdida.
+    await markHandled(threadId);
+    const enviado = await submit(win, typing.textbox);
+
+    if (enviado) {
       await recordReply();
-      await report("sent", `Respondido: "${preview.slice(0, 60)}"`);
+      await report("sent", `Respondido a ${nombre}: "${completo.slice(0, 50)}"`);
       return true;
     }
 
-    await report("error", `El hilo ${threadId} no se envió: el editor no se vació`);
+    await report(
+      "error",
+      `${nombre}: se escribió el copy completo pero no se confirmó el envío. ` +
+        "Revisa el chat: puede haber salido igualmente. No se reintentará."
+    );
     return false;
   }
+
+  let avisoCarpeta = 0;
 
   async function scan() {
     if (busy) return;
@@ -406,32 +694,40 @@
       return;
     }
 
+    if (folderLooksClosed()) {
+      // Una vez cada cinco minutos: es una condición de operación, no un error
+      // que se resuelva solo.
+      if (Date.now() - avisoCarpeta > 300000) {
+        avisoCarpeta = Date.now();
+        await report("warn", "Abre la carpeta «Marketplace» en Messenger: sin ella no se ven los hilos.");
+      }
+      return;
+    }
+
     busy = true;
     try {
       for (const row of listRows()) {
-        if (!isUnread(row.element)) continue;
+        if (!row.unread) continue;
+        if (isOwnReply(row.mensaje)) continue;
         if (await isHandled(row.threadId)) continue;
+        if (await isReviewed(row.threadId)) continue;
 
-        const preview = extractPreview(row.element);
-
-        if (looksLikeOwnReply(preview)) {
-          log(`Hilo ${row.threadId}: el último mensaje es nuestro`);
-          continue;
-        }
-
-        const verdict = LeadClassifier.classify(preview);
+        const verdict = LeadClassifier.classify(row.mensaje);
 
         if (!verdict.autoReply) {
-          // No se abre. Se queda sin leer, esperándote en la bandeja.
-          log(`Hilo ${row.threadId} para ti: ${verdict.reason}`);
+          // No se abre. Se queda sin leer, con su punto azul intacto.
+          if (!yaAnunciados.has(row.threadId)) {
+            yaAnunciados.add(row.threadId);
+            log(`${row.nombre} para ti (sin abrir): ${verdict.reason}`);
+          }
           continue;
         }
 
-        await replyToThread({ ...row, preview });
+        await replyToThread(row);
         return; // uno por pasada: el cupo y el espaciado mandan
       }
     } catch (err) {
-      warn("Fallo recorriendo la bandeja:", err);
+      warn("Fallo recorriendo la carpeta:", err);
       await report("error", err.message);
     } finally {
       busy = false;
@@ -439,139 +735,48 @@
   }
 
   // ======================================================================
-  // Diagnóstico — qué ve la extensión en TU bandeja
-  //
-  // Cuando `listRows()` no encuentra nada, esto dice POR QUÉ: prueba una
-  // batería de selectores candidatos y, a partir del texto de un mensaje
-  // visible, sube por los ancestros describiendo la estructura real.
+  // Diagnóstico
   // ======================================================================
 
-  const PROBE_SELECTORS = [
-    'a[href*="/marketplace/t/"]',
-    'a[href*="/messages/t/"]',
-    'a[href*="/t/"]',
-    'a[role="link"]',
-    '[role="row"]',
-    '[role="listitem"]',
-    '[role="gridcell"]',
-    '[role="grid"]',
-    '[role="article"]',
-    '[role="button"][tabindex]',
-    '[data-virtualized]'
-  ];
-
-  /** Texto que delata una fila de conversación en la lista. */
-  const PROBE_NEEDLE = /disponible|inmueble se encuentra/i;
-
-  function describe(node) {
-    if (!node || node === document.body) return null;
-    const role = node.getAttribute?.("role") || "";
-    const href = node.getAttribute?.("href") || "";
-    const label = (node.getAttribute?.("aria-label") || "").slice(0, 45);
-    return {
-      tag: node.tagName?.toLowerCase(),
-      role,
-      href: href.slice(0, 70),
-      label,
-      hermanos: node.parentElement ? node.parentElement.childElementCount : 0,
-      tieneImg: Boolean(node.querySelector?.("img")),
-      lineas: ((node.innerText || "").match(/\n/g) || []).length + 1
-    };
-  }
-
-  /** El nodo de texto más profundo que contiene la vista previa de un mensaje. */
-  function findPreviewNode() {
-    const all = Array.from(document.querySelectorAll(SELECTORS.textNode));
-    return (
-      all.find(
-        (node) =>
-          PROBE_NEEDLE.test(node.innerText || "") &&
-          !Array.from(node.children).some((child) => PROBE_NEEDLE.test(child.innerText || ""))
-      ) || null
-    );
-  }
-
-  function probeStructure() {
-    const seed = findPreviewNode();
-    if (!seed) return { encontrado: false, ancestros: [] };
-
-    const ancestros = [];
-    let node = seed;
-    for (let level = 0; level < 12 && node && node !== document.body; level += 1) {
-      ancestros.push({ nivel: level, ...describe(node) });
-      node = node.parentElement;
-    }
-    return { encontrado: true, texto: (seed.innerText || "").slice(0, 80), ancestros };
-  }
-
   function diagnose() {
-    const conteos = {};
-    for (const selector of PROBE_SELECTORS) {
-      try {
-        conteos[selector] = document.querySelectorAll(selector).length;
-      } catch {
-        conteos[selector] = "selector inválido";
-      }
-    }
-
-    const rows = listRows();
-    const detalle = rows.map((row) => {
-      const preview = extractPreview(row.element);
-      const verdict = LeadClassifier.classify(preview);
-      const propio = looksLikeOwnReply(preview);
+    const filas = listRows();
+    const detalle = filas.map((row) => {
+      const propio = isOwnReply(row.mensaje);
+      const verdict = LeadClassifier.classify(row.mensaje);
       return {
-        hilo: row.threadId,
-        sinLeer: isUnread(row.element),
-        lineas: rowLines(row.element),
-        preview,
-        autoResponde: verdict.autoReply && !propio,
-        motivo: propio ? "El último mensaje es nuestro" : verdict.reason
+        quien: row.nombre,
+        sinLeer: row.unread,
+        propio,
+        responde: row.unread && !propio && verdict.autoReply,
+        motivo: propio ? "el último mensaje es nuestro" : verdict.reason,
+        menu: Boolean(row.menuButton),
+        mensaje: row.mensaje.slice(0, 55)
       };
     });
 
-    const estructura = probeStructure();
-
-    console.log(`${LOG_PREFIX} ── SONDA DEL DOM ──`);
-    console.log("URL:", window.location.href);
-    console.table(conteos);
-    if (estructura.encontrado) {
-      console.log("Texto semilla:", estructura.texto);
-      console.table(estructura.ancestros);
-    } else {
-      console.warn("No se encontró ningún nodo con texto de mensaje.");
-    }
-    if (detalle.length) console.table(detalle);
-
-    // Resumen compacto: es lo que se muestra en el popup para copiar y pegar.
+    const pendientes = detalle.filter((d) => d.sinLeer && !d.propio);
     const resumen = [
-      `URL: ${window.location.pathname}`,
-      `Filas detectadas por listRows(): ${rows.length}`,
+      `Versión del script: ${VERSION}`,
+      `URL: ${location.pathname}`,
+      `Carpeta Marketplace: ${folderLooksClosed() ? "CERRADA — ábrela" : "abierta"}`,
+      `Conversaciones detectadas: ${filas.length}`,
+      `  sin leer: ${detalle.filter((d) => d.sinLeer).length}` +
+        ` · pendientes: ${pendientes.length}` +
+        ` · se responderían: ${detalle.filter((d) => d.responde).length}`,
+      `  con menú de "no leído": ${detalle.filter((d) => d.menu).length} de ${filas.length}`,
       "",
-      "Selectores candidatos:",
-      ...PROBE_SELECTORS.map((selector) => `  ${conteos[selector]}\t${selector}`),
-      ""
+      ...pendientes.slice(0, 8).map((d) => `  ${d.responde ? "RESP" : "PARA-TI"} · ${d.quien} · ${d.mensaje}`)
     ];
 
-    if (estructura.encontrado) {
-      resumen.push(`Semilla: "${estructura.texto}"`, "Ancestros (nivel · tag · role · hermanos · img · líneas):");
-      for (const a of estructura.ancestros) {
-        resumen.push(
-          `  ${a.nivel} · ${a.tag}${a.role ? ` [${a.role}]` : ""}` +
-            `${a.href ? ` href=${a.href}` : ""}${a.label ? ` label="${a.label}"` : ""}` +
-            ` · ${a.hermanos} herm · ${a.tieneImg ? "img" : "—"} · ${a.lineas} líneas`
-        );
-      }
-    } else {
-      resumen.push("No se encontró texto de mensaje en la página.");
-    }
+    console.log(`${LOG_PREFIX} ── DIAGNÓSTICO ──`);
+    console.table(detalle);
 
     return {
-      total: rows.length,
-      unread: detalle.filter((item) => item.sinLeer).length,
-      wouldReply: detalle.filter((item) => item.sinLeer && item.autoResponde).length,
+      version: VERSION,
+      total: filas.length,
+      unread: detalle.filter((d) => d.sinLeer).length,
+      wouldReply: detalle.filter((d) => d.responde).length,
       resumen: resumen.join("\n"),
-      conteos,
-      estructura,
       detalle
     };
   }
@@ -592,8 +797,8 @@
     setInterval(scan, config.scanIntervalMs);
     scan();
     console.log(
-      `${LOG_PREFIX} activo. Estado: ${config.enabled ? "ENCENDIDO" : "apagado"}. ` +
-        "Usa el botón de diagnóstico del popup para ver qué detecta."
+      `${LOG_PREFIX} ${VERSION} activo en Messenger. Estado: ${config.enabled ? "ENCENDIDO" : "apagado"}. ` +
+        "Recuerda abrir la carpeta «Marketplace»."
     );
   });
 })();
