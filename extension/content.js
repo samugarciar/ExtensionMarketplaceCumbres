@@ -66,7 +66,7 @@
    * recarga la PÁGINA, así que es fácil creer que corre código nuevo cuando no.
    * Ya pasó dos veces; con esto se ve de un vistazo en el popup y la consola.
    */
-  const VERSION = "messenger-3";
+  const VERSION = "messenger-4";
   const DEFAULTS = {
     enabled: false,
     replyCopy: "",
@@ -174,8 +174,24 @@
     return start < end ? hour >= start && hour < end : hour >= start || hour < end;
   }
 
+  /**
+   * ¿Está la pestaña visible?
+   *
+   * Chrome aplica "intensive throttling" a las pestañas ocultas: pasados ~5
+   * minutos, sus temporizadores se limitan a uno por minuto. Como todo aquí se
+   * apoya en temporizadores, en segundo plano una espera de 4 s puede tardar un
+   * minuto y los tiempos de espera vencen antes de tiempo. Es la causa de que
+   * unas veces funcione y otras no.
+   *
+   * Mejor no empezar que empezar y quedarse a medias.
+   */
+  const tabVisible = () => document.visibilityState === "visible";
+
   async function gateCheck() {
     if (!config.enabled) return { ok: false, reason: "Extensión apagada" };
+    if (!tabVisible()) {
+      return { ok: false, reason: "Pestaña en segundo plano (Chrome ralentiza los temporizadores)" };
+    }
     if (!String(config.replyCopy || "").trim()) {
       return { ok: false, reason: "Falta el copy en el popup" };
     }
@@ -757,6 +773,7 @@
     const pendientes = detalle.filter((d) => d.sinLeer && !d.propio);
     const resumen = [
       `Versión del script: ${VERSION}`,
+      `Pestaña visible: ${tabVisible() ? "sí" : "NO — en segundo plano no responde"}`,
       `URL: ${location.pathname}`,
       `Carpeta Marketplace: ${folderLooksClosed() ? "CERRADA — ábrela" : "abierta"}`,
       `Conversaciones detectadas: ${filas.length}`,
@@ -780,6 +797,42 @@
       detalle
     };
   }
+
+  /**
+   * Publica el estado en un atributo del <html>.
+   *
+   * El registro vive en chrome.storage, al que sólo llegan los contextos de la
+   * extensión. Espejarlo en el DOM permite seguir el funcionamiento desde
+   * fuera, sin abrir el popup y sin depender de la consola de una pestaña
+   * concreta. El registro es compartido, así que refleja también lo que hacen
+   * otras pestañas.
+   */
+  async function publishState() {
+    try {
+      const { eventLog = [] } = await chrome.storage.local.get("eventLog");
+      const filas = listRows();
+      document.documentElement.setAttribute(
+        "data-leadrouter",
+        JSON.stringify({
+          version: VERSION,
+          visible: tabVisible(),
+          enabled: config.enabled,
+          carpetaAbierta: !folderLooksClosed(),
+          conversaciones: filas.length,
+          sinLeer: filas.filter((r) => r.unread).length,
+          ultimos: eventLog.slice(0, 12).map((e) => `${e.at?.slice(11, 19)} [${e.level}] ${e.message}`)
+        })
+      );
+    } catch {
+      /* la extensión pudo recargarse bajo los pies */
+    }
+  }
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.eventLog) publishState();
+  });
+  document.addEventListener("visibilitychange", publishState);
+  setInterval(publishState, 5000);
 
   chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request?.action === "DIAGNOSE") {
